@@ -1,0 +1,385 @@
+---
+# ============================================================================
+# Ultimate Secure Setup (Docker + CrowdSec + Smart ClamAV + Hardening)
+# Target System: Kali Linux / Debian / Ubuntu
+# Author: [Your Name/Handle]
+# License: MIT
+# ============================================================================
+
+- name: Ultimate Secure Setup - Generic Edition
+  hosts: all
+  become: yes
+
+  vars:
+    # --- [User Configuration] ---
+    target_user: "deploy"            # Change this to your desired username
+    timezone: "UTC"                  # Change to your timezone (e.g., Asia/Riyadh)
+    ssh_public_key: ""               # Optional: Paste your public key content here (e.g., "ssh-ed25519 AAAA...")
+
+    # --- [System Configuration] ---
+    swap_size: "4G"
+    reverse_tunnel_port: "9999"      # Port for reverse SSH tunnel (if used)
+
+    # --- [Notifications] ---
+    # Leave empty to disable webhook alerts
+    webhook_url: ""                  # Example: https://your-domain.com/webhook/clamav
+
+    # --- [Firewall Settings] ---
+    allowed_inbound_ports:
+      - { port: "22", proto: "tcp", comment: "SSH" }
+      - { port: "41641", proto: "udp", comment: "Tailscale VPN" }
+    
+    allowed_outbound_ports:
+      - { port: 53, proto: udp, comment: "DNS" }
+      - { port: 80, proto: tcp, comment: "HTTP" }
+      - { port: 443, proto: tcp, comment: "HTTPS" }
+      - { port: 123, proto: udp, comment: "NTP" }
+
+    # --- [CrowdSec Configuration] ---
+    # List the containers you want CrowdSec to monitor
+    crowdsec_monitored_containers:
+      - name: traefik_gateway
+        type: traefik
+      - name: odoo-app
+        type: odoo
+      - name: db-odoo
+        type: pgsql
+
+    crowdsec_collections:
+      - crowdsecurity/linux
+      - crowdsecurity/traefik
+      - crowdsecurity/postgresql
+      - crowdsecurity/http-cve
+      - crowdsecurity/base-http-scenarios
+
+    # --- [ClamAV Settings] ---
+    clamav_db_mirror: "database.clamav.net"
+    clamav_quarantine_dir: "/root/quarantine"
+    clamav_log_dir: "/var/log/clamav"
+
+  pre_tasks:
+    - name: Check if running as root
+      assert:
+        that:
+          - ansible_user_uid == 0
+        fail_msg: "Must run as root (use 'become: yes')"
+
+    - name: Detect current SSH connection port
+      shell: echo $SSH_CONNECTION | awk '{print $4}'
+      register: current_ssh_port
+      changed_when: false
+
+  tasks:
+    # ====================================================
+    # 1. Repositories & Updates
+    # ====================================================
+    - name: Configure Repositories (Kali Linux Specific)
+      block:
+        - name: Configure Kali Linux main repository
+          copy:
+            dest: /etc/apt/sources.list
+            backup: yes
+            content: |
+              deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+              deb-src http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+          when: ansible_distribution == 'Kali'
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      register: apt_update
+      until: apt_update is succeeded
+      retries: 3
+
+    - name: Set timezone
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Install essential tools
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - htop
+          - ufw
+          - unzip
+          - jq
+          - net-tools
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - dnsutils
+          - telnet
+          - tmux
+          - supervisor
+          - vim
+          - nano
+          - build-essential
+          - iptables
+          - ipset
+          - nftables
+          - fail2ban
+        state: present
+
+    # ====================================================
+    # 2. User & Access Setup
+    # ====================================================
+    - name: Create new user with sudo access
+      user:
+        name: "{{ target_user }}"
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+        password: "!" # Account locked until key/password set
+        createhome: yes
+
+    - name: Setup SSH Directory
+      file:
+        path: "/home/{{ target_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ target_user }}"
+        group: "{{ target_user }}"
+
+    - name: Add SSH Public Key (if provided in vars)
+      copy:
+        dest: "/home/{{ target_user }}/.ssh/authorized_keys"
+        content: "{{ ssh_public_key }}"
+        mode: '0600'
+        owner: "{{ target_user }}"
+        group: "{{ target_user }}"
+      when: ssh_public_key | length > 0
+      register: ssh_key_added
+
+    - name: Copy root SSH key (Fallback if no key provided)
+      shell: |
+        if [ -f /root/.ssh/authorized_keys ] && [ ! -f /home/{{ target_user }}/.ssh/authorized_keys ]; then
+          cp /root/.ssh/authorized_keys /home/{{ target_user }}/.ssh/authorized_keys
+          chown {{ target_user }}:{{ target_user }} /home/{{ target_user }}/.ssh/authorized_keys
+          chmod 600 /home/{{ target_user }}/.ssh/authorized_keys
+          echo "copied"
+        fi
+      register: ssh_key_copy
+      changed_when: "'copied' in ssh_key_copy.stdout"
+      when: ssh_public_key | length == 0
+
+    - name: Verify SSH key exists
+      stat:
+        path: "/home/{{ target_user }}/.ssh/authorized_keys"
+      register: user_ssh_key_stat
+
+    # ====================================================
+    # 3. Docker Installation
+    # ====================================================
+    - name: Install Docker
+      shell: curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+      register: docker_install
+      ignore_errors: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ target_user }}"
+        groups: docker
+        append: yes
+
+    # ====================================================
+    # 4. ClamAV Setup (Antivirus)
+    # ====================================================
+    - name: Install ClamAV
+      apt:
+        name: [clamav, clamav-daemon, clamav-freshclam]
+        state: present
+
+    - name: Create ClamAV directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: clamav
+        group: clamav
+      loop:
+        - "{{ clamav_log_dir }}"
+        - "{{ clamav_quarantine_dir }}"
+
+    - name: Stop ClamAV for config
+      service:
+        name: "{{ item }}"
+        state: stopped
+      loop: [clamav-daemon, clamav-freshclam]
+      ignore_errors: yes
+
+    - name: Update ClamAV Database
+      shell: freshclam --quiet 2>&1 || true
+      changed_when: false
+
+    - name: Create Smart ClamScan Script
+      copy:
+        dest: /usr/local/bin/smart_clamscan.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Generated by Ansible
+          set -euo pipefail
+          LOG_FILE="{{ clamav_log_dir }}/scan_$(date +%F_%H-%M-%S).log"
+          QUARANTINE_DIR="{{ clamav_quarantine_dir }}"
+          WEBHOOK_URL="{{ webhook_url }}"
+          
+          mkdir -p "$QUARANTINE_DIR"
+          
+          send_alert() {
+              local event="$1"
+              local details="$2"
+              if [ -n "$WEBHOOK_URL" ]; then
+                  # Simple JSON payload
+                  curl -s -X POST -H "Content-Type: application/json" \
+                  -d "{\"event\": \"$event\", \"details\": \"$details\", \"server\": \"$(hostname)\"}" \
+                  "$WEBHOOK_URL" || true
+              fi
+          }
+
+          echo "Starting scan at $(date)" > "$LOG_FILE"
+          
+          # Exclude common system dirs to avoid false positives/loops
+          EXCLUDE_DIRS="--exclude-dir=^/sys --exclude-dir=^/proc --exclude-dir=^/dev --exclude-dir=^/run"
+          
+          /usr/bin/clamscan -r / \
+              --move="$QUARANTINE_DIR" \
+              $EXCLUDE_DIRS \
+              --log="$LOG_FILE" --quiet || true
+              
+          if grep -q "FOUND" "$LOG_FILE"; then
+             send_alert "virus_found" "Threats detected. Check logs."
+          fi
+
+    # ====================================================
+    # 5. CrowdSec Installation
+    # ====================================================
+    - name: Install CrowdSec
+      shell: curl -s https://install.crowdsec.net | bash && apt-get install -y crowdsec
+      args:
+        creates: /etc/crowdsec/config.yaml
+
+    - name: Install Firewall Bouncer
+      apt:
+        name: crowdsec-firewall-bouncer-iptables
+        state: present
+      ignore_errors: yes
+
+    - name: Install CrowdSec Collections
+      shell: "cscli collections install {{ item }} 2>&1"
+      loop: "{{ crowdsec_collections }}"
+      ignore_errors: yes
+
+    - name: Configure CrowdSec Acquisition (Dynamic)
+      copy:
+        dest: /etc/crowdsec/acquis.yaml
+        content: |
+          # System Logs
+          - source: file
+            filenames:
+              - /var/log/auth.log
+              - /var/log/syslog
+            labels:
+              type: syslog
+          
+          # UFW Logs
+          - source: file
+            filenames:
+              - /var/log/ufw.log
+            labels:
+              type: ufw
+
+          # Docker Containers (From Variables)
+          {% for container in crowdsec_monitored_containers %}
+          - source: docker
+            container_name:
+              - {{ container.name }}
+            labels:
+              type: {{ container.type }}
+          {% endfor %}
+      notify: Restart CrowdSec
+
+    # ====================================================
+    # 6. Swap & Sysctl
+    # ====================================================
+    - name: Create Swap File
+      shell: |
+        fallocate -l {{ swap_size }} /swapfile || dd if=/dev/zero of=/swapfile bs=1G count=4
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+      when: ansible_swaptotal_mb < 1000
+      ignore_errors: yes
+
+    - name: Hardening Sysctl
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: "net.ipv4.tcp_syncookies", value: "1" }
+        - { name: "net.ipv4.conf.all.rp_filter", value: "1" }
+        - { name: "net.ipv4.conf.all.accept_redirects", value: "0" }
+
+    # ====================================================
+    # 7. Firewall (UFW) - Safe Mode
+    # ====================================================
+    - name: Reset UFW
+      ufw:
+        state: reset
+
+    - name: Allow Loopback
+      shell: ufw allow in on lo && ufw allow out on lo
+      changed_when: false
+
+    - name: Allow SSH & Essential Ports
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        direction: in
+        comment: "{{ item.comment }}"
+      loop: "{{ allowed_inbound_ports }}"
+
+    - name: Allow Outbound
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        direction: out
+        comment: "{{ item.comment }}"
+      loop: "{{ allowed_outbound_ports }}"
+
+    - name: Allow Reverse Tunnel (In/Out)
+      ufw:
+        rule: allow
+        port: "{{ reverse_tunnel_port }}"
+        proto: tcp
+        comment: "Reverse Tunnel"
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+  handlers:
+    - name: Restart CrowdSec
+      service: name=crowdsec state=restarted
+
+  post_tasks:
+    - name: Success Message
+      debug:
+        msg: |
+          SETUP COMPLETED SUCCESSFULLY!
+          -----------------------------
+          User: {{ target_user }}
+          SSH Key: {{ 'INSTALLED' if user_ssh_key_stat.stat.exists else 'WARNING: NO KEY FOUND' }}
+          Firewall: Enabled
+          CrowdSec: Active
