@@ -1,4 +1,4 @@
-# 🛡️ Ultimate Secure Server Setup (Ansible Playbook)
+Markdown# 🛡️ Ultimate Secure Server Setup (Ansible Playbook)
 
 This Ansible playbook automates the process of securing a Linux server (Kali, Debian, Ubuntu). It installs Docker, configures a Firewall (UFW) with safe defaults, sets up CrowdSec IPS, and installs a smart ClamAV antivirus scanner with webhook alerts.
 
@@ -16,14 +16,10 @@ This Ansible playbook automates the process of securing a Linux server (Kali, De
 
 ### 1. Prerequisites
 * A fresh Linux server (Kali Linux, Ubuntu, or Debian).
-* Ansible installed on your local machine (`sudo apt install ansible`).
-* SSH access to the server as root.
-
-### 2. Configuration
-Open the `secure_kali_setup.yml` file and edit the **vars** section at the top:
-
-```yaml
-vars:
+* Ansible installed on your local machine:
+  ```bash
+  sudo apt install ansible
+SSH access to the server as root.2. ConfigurationOpen the secure_kali_setup.yml file and edit the vars section at the top:YAMLvars:
   target_user: "your_username"       # <--- Change this
   timezone: "Asia/Riyadh"            # <--- Change this
   
@@ -32,29 +28,7 @@ vars:
   
   # Optional: Add a webhook URL for notifications (Discord, etc.)
   webhook_url: ""
-
-### 3. Run the Playbook
-Create an inventory file hosts.ini:
-
-```ini
-[servers]
+3. Create InventoryCreate a file named hosts.ini and add your server IP:Ini, TOML[servers]
 192.168.1.100 ansible_user=root
-
-### 4. Run the command:
-ansible-playbook -i hosts.ini secure_kali_setup.yml
-
-### 🛠️ What specific tools are configured?
-
-Tool,Purpose,Configuration
-UFW,Firewall,Deny Incoming / Allow Specific Outbound.
-CrowdSec,IPS,"Monitors Syslogs, SSH, and Docker containers."
-ClamAV,Antivirus,"Daily ""Smart Scan"" + Weekly Full Scan."
-Fail2Ban,Bruteforce Protection,Protects SSH.
-Docker,Container Engine,Installed with secure logging defaults.
-
-### ⚠️ Disclaimer
-
-This script modifies firewall rules and SSH configurations. Always ensure you have a backup access method (like a console/VNC) before running it on a remote server.
-
-License
-MIT
+4. Run the PlaybookRun the following command to start the setup:Bashansible-playbook -i hosts.ini secure_kali_setup.yml
+🛠️ What specific tools are configured?ToolPurposeConfigurationUFWFirewallDeny Incoming / Allow Specific Outbound.CrowdSecIPSMonitors Syslogs, SSH, and Docker containers.ClamAVAntivirusDaily "Smart Scan" + Weekly Full Scan.Fail2BanBruteforce ProtectionProtects SSH.DockerContainer EngineInstalled with secure logging defaults.⚠️ DisclaimerThis script modifies firewall rules and SSH configurations. Always ensure you have a backup access method (like a console/VNC) before running it on a remote server.LicenseMIT
