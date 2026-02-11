@@ -1,4 +1,5 @@
-Markdown# 🛡️ Ultimate Secure Server Setup (Ansible Playbook)
+Markdown
+# 🛡️ Ultimate Secure Server Setup (Ansible Playbook)
 
 This Ansible playbook automates the process of securing a Linux server (Kali, Debian, Ubuntu). It installs Docker, configures a Firewall (UFW) with safe defaults, sets up CrowdSec IPS, and installs a smart ClamAV antivirus scanner with webhook alerts.
 
