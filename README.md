@@ -33,15 +33,17 @@ vars:
   # Optional: Add a webhook URL for notifications (Discord, etc.)
   webhook_url: ""
 
-2.Run the Playbook
+### 3. Run the Playbook
 Create an inventory file hosts.ini:
+
+```ini
 [servers]
 192.168.1.100 ansible_user=root
 
-3.Run the command:
+### 4. Run the command:
 ansible-playbook -i hosts.ini secure_kali_setup.yml
 
-🛠️ What specific tools are configured?
+### 🛠️ What specific tools are configured?
 
 Tool,Purpose,Configuration
 UFW,Firewall,Deny Incoming / Allow Specific Outbound.
@@ -50,7 +52,7 @@ ClamAV,Antivirus,"Daily ""Smart Scan"" + Weekly Full Scan."
 Fail2Ban,Bruteforce Protection,Protects SSH.
 Docker,Container Engine,Installed with secure logging defaults.
 
-⚠️ Disclaimer
+### ⚠️ Disclaimer
 
 This script modifies firewall rules and SSH configurations. Always ensure you have a backup access method (like a console/VNC) before running it on a remote server.
 
