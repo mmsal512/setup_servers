@@ -1,0 +1,1341 @@
+---
+# ============================================================================
+# Ultimate Secure Setup (Docker + CrowdSec + Smart ClamAV + Full Hardening)
+# النسخة العامة المُحسّنة - الإصدار 3.1
+# متوافق مع: Kali Linux / Debian 11+ / Ubuntu 20.04+
+# ============================================================================
+# المميزات:
+#   1. حماية الاتصال عند تفعيل UFW (ESTABLISHED/RELATED)
+#   2. تثبيت CrowdSec Bouncer بعدة طرق احتياطية
+#   3. تثبيت Docker قبل تفعيل UFW
+#   4. تحديث ClamAV قبل تفعيل UFW
+#   5. سكربت فحص ذكي (يومي + أسبوعي)
+#   6. سكربت طوارئ لاستعادة الوصول
+#   7. SSH Hardening مع وضع آمن تلقائي
+# ============================================================================
+#
+# الاستخدام:
+#   1. عدّل المتغيرات في قسم vars حسب احتياجك
+#   2. أنشئ ملف inventory باسم hosts.ini
+#   3. شغّل: ansible-playbook -i hosts.ini setup.yml
+#
+# ============================================================================
+
+- name: Ultimate Secure Setup v3.1 - Universal Edition
+  hosts: target_servers
+  become: yes
+
+  vars:
+    # ==========================================================
+    # ⬇⬇⬇  عدّل هذه المتغيرات فقط حسب سيرفرك  ⬇⬇⬇
+    # ==========================================================
+
+    # --- [معلومات المستخدم] ---
+    new_user: "deploy"                          # اسم المستخدم الجديد
+    ssh_public_key: ""                          # ضع مفتاحك العام هنا (اختياري)
+                                                # مثال: "ssh-ed25519 AAAAC3Nz... user@host"
+
+    # --- [إعدادات النظام] ---
+    timezone: "UTC"                             # المنطقة الزمنية (مثل: Asia/Riyadh, Europe/London)
+    swap_size: "4G"                             # حجم Swap المطلوب
+
+    # --- [إعدادات الشبكة] ---
+    reverse_tunnel_port: "9999"                 # منفذ النفق العكسي (غيّره حسب حاجتك)
+
+    # --- [الإشعارات - اتركه فارغ لتعطيل التنبيهات] ---
+    webhook_url: ""                             # رابط Webhook للتنبيهات
+                                                # مثال: "https://example.com/webhook/alerts"
+
+    # --- [المنافذ المسموح بها - الوارد] ---
+    allowed_inbound_ports:
+      - { port: "22", proto: "tcp", comment: "SSH access" }
+      - { port: "41641", proto: "udp", comment: "Tailscale VPN" }
+      # أضف منافذ إضافية هنا حسب حاجتك:
+      # - { port: "8080", proto: "tcp", comment: "Web App" }
+      # - { port: "8069", proto: "tcp", comment: "Odoo" }
+
+    # --- [المنافذ المسموح بها - الصادر] ---
+    allowed_outbound_ports:
+      - { port: "53", proto: "udp", comment: "DNS queries" }
+      - { port: "53", proto: "tcp", comment: "DNS queries TCP" }
+      - { port: "80", proto: "tcp", comment: "HTTP updates" }
+      - { port: "443", proto: "tcp", comment: "HTTPS secure" }
+      - { port: "123", proto: "udp", comment: "NTP time sync" }
+
+    # --- [Cloudflare - اضبط على true إذا تستخدم Cloudflare] ---
+    enable_cloudflare_whitelist: true
+
+    # --- [CrowdSec - الحاويات المراقبة] ---
+    crowdsec_monitored_containers:
+      - { name: "traefik_gateway", type: "traefik" }
+      - { name: "app", type: "syslog" }
+      - { name: "db", type: "pgsql" }
+      # عدّل أسماء الحاويات حسب مشروعك
+
+    crowdsec_collections:
+      - crowdsecurity/linux
+      - crowdsecurity/traefik
+      - crowdsecurity/postgresql
+      - crowdsecurity/http-cve
+      - crowdsecurity/base-http-scenarios
+
+    # --- [ClamAV] ---
+    clamav_db_mirror: "database.clamav.net"
+    clamav_quarantine_dir: "/root/quarantine"
+    clamav_log_dir: "/var/log/clamav"
+    clamav_full_scan_day: "5"                   # يوم الفحص الشامل (5=الجمعة، 0=الأحد)
+    clamav_daily_scan_hour: "2"                 # ساعة الفحص اليومي
+    clamav_full_scan_hour: "3"                  # ساعة الفحص الأسبوعي
+
+    # --- [Docker] ---
+    docker_log_max_size: "10m"
+    docker_log_max_file: "3"
+
+    # --- [Fail2ban] ---
+    fail2ban_bantime: "86400"                   # مدة الحظر بالثواني (86400 = 24 ساعة)
+    fail2ban_findtime: "600"                    # نافذة البحث (10 دقائق)
+    fail2ban_maxretry: "3"                      # عدد المحاولات قبل الحظر
+
+    # ==========================================================
+    # ⬆⬆⬆  نهاية المتغيرات القابلة للتعديل  ⬆⬆⬆
+    # ==========================================================
+
+    # --- [متغيرات داخلية - لا تعدّلها] ---
+    supported_distros:
+      - "Kali"
+      - "Debian"
+      - "Ubuntu"
+
+    clamav_exclude_dirs:
+      - "^/sys"
+      - "^/proc"
+      - "^/dev"
+      - "^/run"
+      - "^/mnt"
+      - "^/media"
+      - "^/var/lib/postgresql"
+      - "^/var/lib/mysql"
+      - "^/var/lib/docker/overlay2"
+      - "^/var/lib/docker/containers"
+      - "^/var/cache"
+      - "^/usr/share/doc"
+
+  # ====================================================
+  # التحضيرات الأولية
+  # ====================================================
+  pre_tasks:
+    - name: Check if running as root
+      assert:
+        that:
+          - ansible_user_uid == 0
+        fail_msg: "يجب تشغيل الـ Playbook كـ root (استخدم become: yes)"
+
+    - name: Get system information
+      setup:
+        filter: "ansible_*"
+
+    - name: Verify supported distribution
+      assert:
+        that:
+          - ansible_distribution in supported_distros
+        fail_msg: >
+          التوزيعة {{ ansible_distribution }} غير مدعومة.
+          التوزيعات المدعومة: {{ supported_distros | join(', ') }}
+
+    - name: Display system information
+      debug:
+        msg: |
+          النظام: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          المعالج: {{ ansible_architecture }}
+          الذاكرة: {{ ansible_memtotal_mb }} MB
+
+    - name: Detect current SSH connection port
+      shell: echo $SSH_CONNECTION | awk '{print $4}'
+      register: current_ssh_port
+      changed_when: false
+
+    - name: Display connection info
+      debug:
+        msg: "متصل عبر SSH على المنفذ {{ current_ssh_port.stdout | default('22') }}"
+
+  # ====================================================
+  # المهام الرئيسية
+  # ====================================================
+  tasks:
+    # ====================================================
+    # 1. إصلاح المستودعات والتحديثات
+    # ====================================================
+    - name: Configure Kali Linux repository
+      copy:
+        dest: /etc/apt/sources.list
+        backup: yes
+        content: |
+          deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+          deb-src http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+      when: ansible_distribution == 'Kali'
+
+    - name: Remove problematic repositories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/kali-archive.list
+        - /etc/apt/sources.list.d/docker.list
+        - /etc/apt/sources.list.d/download_docker_com_linux_debian.list
+      ignore_errors: yes
+
+    - name: Ensure archive keyring is installed (Kali)
+      apt:
+        name: kali-archive-keyring
+        state: present
+      when: ansible_distribution == 'Kali'
+      ignore_errors: yes
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: apt_update
+      until: apt_update is succeeded
+      retries: 3
+      delay: 10
+
+    - name: Set timezone
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Install essential tools
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - htop
+          - ufw
+          - unzip
+          - jq
+          - net-tools
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - dnsutils
+          - telnet
+          - tmux
+          - supervisor
+          - vim
+          - nano
+          - build-essential
+          - iptables
+          - ipset
+          - nftables
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: tools_install
+      until: tools_install is succeeded
+      retries: 3
+      delay: 10
+
+    # ====================================================
+    # 2. إعداد المستخدمين والأذونات
+    # ====================================================
+    - name: Ensure docker group exists
+      group:
+        name: docker
+        state: present
+
+    - name: Create new user with sudo access
+      user:
+        name: "{{ new_user }}"
+        shell: /bin/bash
+        home: "/home/{{ new_user }}"
+        createhome: yes
+        groups: sudo,docker
+        append: yes
+        password: "!"
+        state: present
+
+    - name: Configure sudo without password for docker commands
+      copy:
+        dest: "/etc/sudoers.d/{{ new_user }}-docker"
+        content: "{{ new_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose, /usr/local/bin/docker-compose"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Create SSH directory for new user
+      file:
+        path: "/home/{{ new_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+
+    - name: Add SSH public key (if provided in vars)
+      copy:
+        dest: "/home/{{ new_user }}/.ssh/authorized_keys"
+        content: "{{ ssh_public_key }}"
+        mode: '0600'
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+      when: ssh_public_key | length > 0
+
+    - name: Copy SSH public key from root (fallback if no key provided)
+      shell: |
+        if [ -f /root/.ssh/authorized_keys ] && [ ! -f /home/{{ new_user }}/.ssh/authorized_keys ]; then
+          cp /root/.ssh/authorized_keys /home/{{ new_user }}/.ssh/authorized_keys
+          chown {{ new_user }}:{{ new_user }} /home/{{ new_user }}/.ssh/authorized_keys
+          chmod 600 /home/{{ new_user }}/.ssh/authorized_keys
+          echo "SSH key copied from root"
+        elif [ -f /home/{{ new_user }}/.ssh/authorized_keys ]; then
+          echo "SSH key already exists"
+        else
+          echo "WARNING: No SSH key found anywhere"
+        fi
+      register: ssh_key_copy_result
+      changed_when: "'copied' in ssh_key_copy_result.stdout"
+      when: ssh_public_key | length == 0
+
+    - name: Display SSH key status
+      debug:
+        msg: "{{ ssh_key_copy_result.stdout_lines | default(['SSH key set from vars']) }}"
+
+    - name: Verify SSH key exists for new user
+      stat:
+        path: "/home/{{ new_user }}/.ssh/authorized_keys"
+      register: new_user_ssh_key
+
+    - name: WARN if no SSH key found
+      debug:
+        msg: |
+          ⚠️  تحذير: لم يتم العثور على مفتاح SSH للمستخدم {{ new_user }}!
+          يجب إضافة مفتاح SSH يدوياً قبل إعادة التشغيل!
+          استخدم: ssh-copy-id {{ new_user }}@SERVER_IP
+      when: not new_user_ssh_key.stat.exists
+
+    # ====================================================
+    # 3. Docker & Docker Compose (قبل UFW)
+    # ====================================================
+    - name: Check if Docker is already installed
+      stat:
+        path: /usr/bin/docker
+      register: docker_check
+
+    - name: Install Docker from system repos
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: docker_repo_install
+      ignore_errors: yes
+      when: not docker_check.stat.exists
+
+    - name: Install Docker from official script (fallback)
+      shell: curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+      register: docker_script_install
+      retries: 3
+      delay: 10
+      until: docker_script_install is succeeded
+      when:
+        - not docker_check.stat.exists
+        - docker_repo_install is failed
+      ignore_errors: yes
+
+    - name: Install Docker Compose standalone (if not available)
+      shell: |
+        if ! command -v docker-compose &> /dev/null; then
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+        fi
+      args:
+        creates: /usr/local/bin/docker-compose
+      ignore_errors: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ new_user }}"
+        groups: docker
+        append: yes
+
+    - name: Configure Docker daemon.json
+      copy:
+        dest: /etc/docker/daemon.json
+        backup: yes
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "{{ docker_log_max_size }}",
+              "max-file": "{{ docker_log_max_file }}"
+            },
+            "live-restore": true,
+            "icc": false,
+            "default-runtime": "runc"
+          }
+      notify: Restart Docker
+
+    - name: Start and enable Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    # ====================================================
+    # 4. ClamAV (قبل UFW لتحديث قاعدة البيانات)
+    # ====================================================
+    - name: Install ClamAV packages
+      apt:
+        name:
+          - clamav
+          - clamav-daemon
+          - clamav-freshclam
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: clamav_install
+      until: clamav_install is succeeded
+      retries: 3
+      delay: 10
+
+    - name: Create ClamAV directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: clamav
+        group: clamav
+      loop:
+        - "{{ clamav_log_dir }}"
+        - "{{ clamav_quarantine_dir }}"
+
+    - name: Stop ClamAV daemons to save resources
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - clamav-daemon
+        - clamav-freshclam
+      ignore_errors: yes
+
+    - name: Stop ClamAV socket
+      service:
+        name: clamav-daemon.socket
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Configure freshclam.conf
+      copy:
+        dest: /etc/clamav/freshclam.conf
+        backup: yes
+        content: |
+          DatabaseDirectory /var/lib/clamav
+          UpdateLogFile {{ clamav_log_dir }}/freshclam.log
+          LogFileMaxSize 50M
+          DatabaseOwner clamav
+          Checks 24
+          DatabaseMirror {{ clamav_db_mirror }}
+          ConnectTimeout 30
+          ReceiveTimeout 30
+          ScriptedUpdates yes
+          CompressLocalDatabase no
+          Bytecode yes
+          LogVerbose no
+          Debug no
+          MaxRetries 3
+          RetryAttempts 3
+
+    - name: Update ClamAV database (before UFW blocks)
+      shell: freshclam --quiet 2>&1 || true
+      register: freshclam_result
+      until: freshclam_result is succeeded
+      retries: 3
+      delay: 10
+      changed_when: false
+
+    - name: Create Smart ClamScan Script
+      copy:
+        dest: /usr/local/bin/smart_clamscan.sh
+        mode: '0755'
+        backup: yes
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+
+          # خفض أولوية العملية لتقليل الضغط على النظام
+          echo 1000 > /proc/$$/oom_score_adj 2>/dev/null || true
+
+          LOG_FILE="{{ clamav_log_dir }}/scan_$(date +%F_%H-%M-%S).log"
+          QUARANTINE_DIR="{{ clamav_quarantine_dir }}"
+          WEBHOOK_URL="{{ webhook_url }}"
+          SERVER_NAME=$(hostname)
+          DAY_OF_WEEK=$(date +%u)
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+          FULL_SCAN_DAY="{{ clamav_full_scan_day }}"
+
+          mkdir -p "$QUARANTINE_DIR" 2>/dev/null || true
+          mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+
+          send_alert() {
+              local event="$1"
+              local details="$2"
+
+              if command -v jq &> /dev/null && [ -n "$WEBHOOK_URL" ]; then
+                  local payload=$(jq -n \
+                      --arg event "$event" \
+                      --arg details "$details" \
+                      --arg srv "$SERVER_NAME" \
+                      --arg time "$TIMESTAMP" \
+                      '{event: $event, details: $details, server: $srv, timestamp: $time}' 2>/dev/null || echo "{}")
+
+                  curl -s -X POST \
+                      -H "Content-Type: application/json" \
+                      -d "$payload" \
+                      "$WEBHOOK_URL" --max-time 30 2>&1 || echo "Webhook failed" >> "$LOG_FILE"
+              fi
+          }
+
+          # تحديد نوع الفحص حسب اليوم
+          if [ "$DAY_OF_WEEK" -eq "$FULL_SCAN_DAY" ]; then
+              SCAN_TYPE="Full Scan (Weekly)"
+              SCAN_DIRS="/"
+              MAX_TIME="14h"
+          else
+              SCAN_TYPE="Hotspot Scan (Daily)"
+              SCAN_DIRS=""
+              for d in /home /tmp /var/lib/docker/volumes /etc /var/www /opt; do
+                  [ -d "$d" ] && SCAN_DIRS="$SCAN_DIRS $d"
+              done
+              MAX_TIME="3h"
+          fi
+
+          # بناء قائمة الاستثناءات
+          EXCLUDE_ARGS=""
+          for dir in /sys /proc /dev /run /mnt /media /var/lib/postgresql /var/lib/mysql /var/lib/docker/overlay2 /var/lib/docker/containers /var/cache /usr/share/doc; do
+              EXCLUDE_ARGS="$EXCLUDE_ARGS --exclude-dir=^${dir}"
+          done
+
+          {
+              echo "========================================="
+              echo "Scan Type: $SCAN_TYPE"
+              echo "Start Time: $TIMESTAMP"
+              echo "Target Directories: $SCAN_DIRS"
+              echo "========================================="
+          } | tee "$LOG_FILE"
+
+          # تشغيل الفحص بأولوية منخفضة
+          timeout $MAX_TIME nice -n 19 ionice -c 3 /usr/bin/clamscan \
+              -r $SCAN_DIRS \
+              --move="$QUARANTINE_DIR" \
+              $EXCLUDE_ARGS \
+              --log="$LOG_FILE" \
+              --quiet 2>&1 || true
+
+          EXIT_CODE=${PIPESTATUS[0]:-$?}
+          END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+
+          {
+              echo "========================================="
+              echo "End Time: $END_TIME"
+              echo "Exit Code: $EXIT_CODE"
+              echo "========================================="
+          } >> "$LOG_FILE"
+
+          case $EXIT_CODE in
+              0)
+                  echo "Scan completed: No threats found" >> "$LOG_FILE"
+                  ;;
+              1)
+                  INFECTED_COUNT=$(grep -c "FOUND" "$LOG_FILE" 2>/dev/null || echo "0")
+                  INFECTED_FILES=$(grep "FOUND" "$LOG_FILE" 2>/dev/null | head -n 20 || echo "No details")
+                  echo "Infected files detected: $INFECTED_COUNT" >> "$LOG_FILE"
+                  send_alert "virus_found" "Infected files: $INFECTED_COUNT. Details: $INFECTED_FILES"
+                  ;;
+              124)
+                  echo "Scan timed out after $MAX_TIME" >> "$LOG_FILE"
+                  send_alert "scan_timeout" "Scan stopped (Timeout) - Type: $SCAN_TYPE"
+                  ;;
+              *)
+                  echo "Scan failed with exit code: $EXIT_CODE" >> "$LOG_FILE"
+                  send_alert "scan_error" "Scan failed with error code: $EXIT_CODE"
+                  ;;
+          esac
+
+          # تنظيف السجلات القديمة (أكثر من 30 يوم)
+          find "{{ clamav_log_dir }}" -name "scan_*.log" -mtime +30 -delete 2>/dev/null || true
+
+    - name: Setup ClamAV Cron Jobs
+      cron:
+        name: "{{ item.name }}"
+        minute: "{{ item.minute }}"
+        hour: "{{ item.hour }}"
+        weekday: "{{ item.weekday | default('*') }}"
+        job: "{{ item.job }}"
+        user: root
+      loop:
+        - name: "Update ClamAV Database (Every 4 hours)"
+          minute: "0"
+          hour: "*/4"
+          weekday: "*"
+          job: "/usr/bin/freshclam --quiet 2>&1 | logger -t clamav"
+
+        - name: "Smart Scan - Daily Hotspot"
+          minute: "0"
+          hour: "{{ clamav_daily_scan_hour }}"
+          weekday: "*"
+          job: "/usr/local/bin/smart_clamscan.sh"
+
+        - name: "Clean Old Quarantine"
+          minute: "0"
+          hour: "4"
+          weekday: "*"
+          job: "find {{ clamav_quarantine_dir }} -type f -mtime +30 -delete 2>/dev/null || true"
+
+    # ====================================================
+    # 5. CrowdSec
+    # ====================================================
+    - name: Install CrowdSec from system repos
+      apt:
+        name:
+          - crowdsec
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: crowdsec_repo_install
+      until: crowdsec_repo_install is succeeded
+      retries: 3
+      delay: 10
+      ignore_errors: yes
+
+    - name: Install CrowdSec from packagecloud (fallback)
+      block:
+        - name: Add CrowdSec Repository via script
+          shell: curl -s https://install.crowdsec.net | bash
+          args:
+            creates: /etc/apt/sources.list.d/crowdsec_crowdsec.list
+
+        - name: Pin CrowdSec repo priority
+          copy:
+            dest: /etc/apt/preferences.d/crowdsec
+            content: |
+              Package: *
+              Pin: release o=packagecloud.io/crowdsec/crowdsec,a=any,n=any,c=main
+              Pin-Priority: 1001
+
+        - name: Update apt cache after adding CrowdSec repo
+          apt:
+            update_cache: yes
+
+        - name: Install CrowdSec from packagecloud
+          apt:
+            name:
+              - crowdsec
+            state: present
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+      when: crowdsec_repo_install is failed
+      ignore_errors: yes
+
+    - name: Verify CrowdSec is installed
+      shell: which cscli
+      register: cscli_check
+      changed_when: false
+      failed_when: false
+
+    - name: Detect firewall backend (iptables vs nftables)
+      shell: iptables -V 2>&1 || echo "unknown"
+      register: iptables_version
+      changed_when: false
+      failed_when: false
+
+    - name: Set firewall bouncer package name
+      set_fact:
+        bouncer_package: >-
+          {%- if 'nf_tables' in (iptables_version.stdout | default('')) -%}
+          crowdsec-firewall-bouncer-nftables
+          {%- else -%}
+          crowdsec-firewall-bouncer-iptables
+          {%- endif -%}
+
+    - name: Install CrowdSec Firewall Bouncer (unified package)
+      apt:
+        name: crowdsec-firewall-bouncer
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: cscli_check.rc == 0
+      register: bouncer_unified
+      ignore_errors: yes
+
+    - name: Install CrowdSec Firewall Bouncer (backend-specific fallback)
+      apt:
+        name: "{{ bouncer_package }}"
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when:
+        - cscli_check.rc == 0
+        - bouncer_unified is failed
+      register: bouncer_specific
+      ignore_errors: yes
+
+    - name: Install CrowdSec Firewall Bouncer from GitHub (final fallback)
+      block:
+        - name: Download and install latest firewall bouncer
+          shell: |
+            LATEST_URL=$(curl -s https://api.github.com/repos/crowdsecurity/cs-firewall-bouncer/releases/latest | jq -r '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .browser_download_url')
+            if [ -n "$LATEST_URL" ] && [ "$LATEST_URL" != "null" ]; then
+              cd /tmp
+              curl -sLO "$LATEST_URL"
+              tar xzf crowdsec-firewall-bouncer*.tar.gz
+              cd crowdsec-firewall-bouncer*/
+              bash install.sh
+              echo "Installed from GitHub"
+            else
+              echo "FAILED: Could not find release URL"
+              exit 1
+            fi
+          args:
+            creates: /usr/local/bin/crowdsec-firewall-bouncer
+      when:
+        - cscli_check.rc == 0
+        - bouncer_unified is failed
+        - bouncer_specific is failed
+      ignore_errors: yes
+
+    - name: Update CrowdSec hub
+      shell: cscli hub update 2>&1
+      when: cscli_check.rc == 0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Install CrowdSec Collections
+      shell: "cscli collections install {{ item }} --force 2>&1"
+      loop: "{{ crowdsec_collections }}"
+      when: cscli_check.rc == 0
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Configure CrowdSec Acquisition (acquis.yaml)
+      copy:
+        dest: /etc/crowdsec/acquis.yaml
+        backup: yes
+        content: |
+          # === System Logs ===
+          - source: file
+            filenames:
+              - /var/log/auth.log
+              - /var/log/syslog
+              - /var/log/kern.log
+            labels:
+              type: syslog
+
+          - source: file
+            filenames:
+              - /var/log/ufw.log
+            labels:
+              type: ufw
+
+          # === Docker Containers ===
+          {% for container in crowdsec_monitored_containers %}
+          - source: docker
+            container_name:
+              - {{ container.name }}
+            labels:
+              type: {{ container.type }}
+            exclude: false
+
+          {% endfor %}
+      when: cscli_check.rc == 0
+      notify: Restart CrowdSec
+
+    - name: Enable and start CrowdSec
+      service:
+        name: crowdsec
+        state: started
+        enabled: yes
+      when: cscli_check.rc == 0
+      register: crowdsec_service
+      retries: 3
+      delay: 10
+      until: crowdsec_service is succeeded
+      ignore_errors: yes
+
+    # ====================================================
+    # 6. Swap
+    # ====================================================
+    - name: Check if swap exists
+      stat:
+        path: /swapfile
+      register: swapfile_check
+
+    - name: Create swap file
+      shell: |
+        fallocate -l {{ swap_size }} /swapfile 2>&1 || dd if=/dev/zero of=/swapfile bs=1G count=4
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+      when: not swapfile_check.stat.exists
+      ignore_errors: yes
+
+    - name: Add swap to fstab
+      lineinfile:
+        path: /etc/fstab
+        line: '/swapfile none swap sw 0 0'
+        state: present
+        regexp: '.*swapfile.*'
+
+    - name: Verify swap
+      shell: swapon --show
+      register: swap_status
+      changed_when: false
+
+    - name: Display swap status
+      debug:
+        msg: "{{ swap_status.stdout_lines | default(['Swap not available']) }}"
+
+    # ====================================================
+    # 7. Security Hardening
+    # ====================================================
+    - name: Verify SSH key exists before locking down SSH
+      stat:
+        path: "/home/{{ new_user }}/.ssh/authorized_keys"
+      register: ssh_key_final_check
+
+    - name: Configure SSH security (LOCKED DOWN - SSH key found)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin no" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication no" }
+        - { regexp: "^#?PubkeyAuthentication", line: "PubkeyAuthentication yes" }
+        - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 3" }
+        - { regexp: "^#?ClientAliveInterval", line: "ClientAliveInterval 300" }
+        - { regexp: "^#?ClientAliveCountMax", line: "ClientAliveCountMax 3" }
+      when: ssh_key_final_check.stat.exists
+      notify: Restart SSH
+
+    - name: Configure SSH security (SAFE MODE - no SSH key found)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin prohibit-password" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication yes" }
+        - { regexp: "^#?PubkeyAuthentication", line: "PubkeyAuthentication yes" }
+        - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 3" }
+        - { regexp: "^#?ClientAliveInterval", line: "ClientAliveInterval 300" }
+        - { regexp: "^#?ClientAliveCountMax", line: "ClientAliveCountMax 3" }
+      when: not ssh_key_final_check.stat.exists
+      notify: Restart SSH
+
+    - name: CRITICAL WARNING - SSH key not found
+      debug:
+        msg: |
+          ============================================================
+          ⚠️  تحذير حرج: لم يتم العثور على مفتاح SSH للمستخدم {{ new_user }}!
+          الوضع الآمن مفعّل: كلمة المرور لا تزال مسموحة.
+          يجب عليك:
+            1. إضافة مفتاح SSH: ssh-copy-id {{ new_user }}@SERVER_IP
+            2. تعديل: PasswordAuthentication no
+            3. إعادة تشغيل: systemctl restart ssh
+          ============================================================
+      when: not ssh_key_final_check.stat.exists
+
+    - name: Configure sysctl security settings
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_set: yes
+        reload: yes
+      loop:
+        - { name: "net.ipv4.tcp_syncookies", value: "1" }
+        - { name: "net.ipv4.conf.default.rp_filter", value: "1" }
+        - { name: "net.ipv4.conf.all.rp_filter", value: "1" }
+        - { name: "net.ipv4.conf.all.accept_redirects", value: "0" }
+        - { name: "net.ipv4.conf.default.accept_redirects", value: "0" }
+        - { name: "net.ipv4.conf.all.send_redirects", value: "0" }
+        - { name: "net.ipv4.icmp_echo_ignore_broadcasts", value: "1" }
+        - { name: "net.ipv4.conf.all.log_martians", value: "1" }
+        - { name: "net.ipv6.conf.all.accept_redirects", value: "0" }
+        - { name: "net.ipv6.conf.default.accept_redirects", value: "0" }
+      ignore_errors: yes
+
+    - name: Install fail2ban
+      apt:
+        name: fail2ban
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      ignore_errors: yes
+
+    - name: Configure fail2ban for SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime = {{ fail2ban_bantime }}
+          findtime = {{ fail2ban_findtime }}
+          maxretry = {{ fail2ban_maxretry }}
+          backend = systemd
+
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          maxretry = {{ fail2ban_maxretry }}
+          bantime = {{ fail2ban_bantime }}
+      notify: Restart fail2ban
+      ignore_errors: yes
+
+    # ====================================================
+    # 8. الجدار الناري UFW (آخر شيء)
+    # ====================================================
+    - name: Disable UFW initially for configuration
+      ufw:
+        state: disabled
+      ignore_errors: yes
+
+    - name: Reset UFW to defaults
+      shell: echo "y" | ufw reset
+      changed_when: false
+      ignore_errors: yes
+
+    # ✅ الإصلاح الحرج: ESTABLISHED/RELATED في before.rules
+    - name: Patch UFW before.rules - Allow ESTABLISHED/RELATED outbound
+      blockinfile:
+        path: /etc/ufw/before.rules
+        insertafter: "^-A ufw-before-output -o lo -j ACCEPT"
+        marker: "# {mark} ANSIBLE MANAGED - Allow established outbound connections"
+        block: |
+          # Allow all established and related outbound connections
+          # This prevents cutting off active SSH/tunnel sessions
+          -A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        backup: yes
+
+    - name: Verify ESTABLISHED/RELATED rule exists for input
+      shell: |
+        grep -q "ufw-before-input.*RELATED,ESTABLISHED" /etc/ufw/before.rules && \
+        echo "OK" || echo "Missing"
+      register: input_established_check
+      changed_when: false
+
+    - name: Display before.rules check
+      debug:
+        msg: "Input ESTABLISHED/RELATED rule: {{ input_established_check.stdout }}"
+
+    - name: Set default UFW policies
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'deny' }
+        - { direction: 'routed', policy: 'allow' }
+
+    - name: Allow loopback interface
+      shell: |
+        ufw allow in on lo
+        ufw allow out on lo
+      changed_when: false
+
+    - name: Allow outbound essential ports
+      ufw:
+        rule: allow
+        direction: out
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop: "{{ allowed_outbound_ports }}"
+
+    - name: Allow outbound reverse tunnel port
+      ufw:
+        rule: allow
+        direction: out
+        port: "{{ reverse_tunnel_port }}"
+        proto: tcp
+        comment: "Reverse SSH Tunnel outbound"
+
+    - name: Allow inbound ports
+      ufw:
+        rule: allow
+        direction: in
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop: "{{ allowed_inbound_ports }}"
+
+    - name: Allow inbound Reverse Tunnel Port
+      ufw:
+        rule: allow
+        direction: in
+        port: "{{ reverse_tunnel_port }}"
+        proto: tcp
+        comment: "Reverse SSH Tunnel inbound"
+
+    - name: Allow Docker bridge network traffic
+      shell: |
+        ufw allow in on docker0
+        ufw allow out on docker0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Download and whitelist Cloudflare IPs
+      block:
+        - name: Download Cloudflare IP lists
+          get_url:
+            url: "{{ item.url }}"
+            dest: "{{ item.dest }}"
+            timeout: 30
+          loop:
+            - { url: 'https://www.cloudflare.com/ips-v4', dest: '/tmp/cf_ipv4' }
+            - { url: 'https://www.cloudflare.com/ips-v6', dest: '/tmp/cf_ipv6' }
+          register: cf_download
+          retries: 3
+          delay: 5
+          until: cf_download is succeeded
+
+        - name: Allow Cloudflare IPs on HTTP/HTTPS
+          shell: |
+            for file in /tmp/cf_ipv4 /tmp/cf_ipv6; do
+              if [ -f "$file" ]; then
+                while IFS= read -r ip; do
+                  [ -z "$ip" ] && continue
+                  ufw allow from "$ip" to any port 80,443 proto tcp comment "Cloudflare" 2>/dev/null || true
+                done < "$file"
+              fi
+            done
+          args:
+            executable: /bin/bash
+          changed_when: false
+      when: enable_cloudflare_whitelist | bool
+      ignore_errors: yes
+
+    # ✅ التحقق قبل التفعيل
+    - name: Final verification of before.rules
+      shell: |
+        echo "=== ESTABLISHED/RELATED rules ==="
+        grep -n "ESTABLISHED\|RELATED" /etc/ufw/before.rules
+      register: before_rules_check
+      changed_when: false
+
+    - name: Display before.rules verification
+      debug:
+        msg: "{{ before_rules_check.stdout_lines }}"
+
+    # ✅ تفعيل UFW كآخر خطوة
+    - name: Enable UFW (final step)
+      ufw:
+        state: enabled
+        logging: 'low'
+
+    - name: Verify UFW rules after enabling
+      shell: ufw status verbose
+      register: ufw_status
+      changed_when: false
+
+    - name: Display UFW status
+      debug:
+        msg: "{{ ufw_status.stdout_lines | default(['UFW not available']) }}"
+
+    - name: Connectivity test after UFW enabled
+      shell: echo "UFW enabled and connection still alive at $(date)"
+      register: post_ufw_test
+      changed_when: false
+
+    - name: Display connectivity confirmation
+      debug:
+        msg: "✅ {{ post_ufw_test.stdout }}"
+
+    # ====================================================
+    # 9. Monitoring & Logging
+    # ====================================================
+    - name: Create monitoring script
+      copy:
+        dest: /usr/local/bin/system_monitor.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+
+          echo "====== System Health Report ======"
+          echo "Timestamp: $(date)"
+          echo "Hostname: $(hostname)"
+          echo ""
+
+          echo "=== Disk Usage ==="
+          df -h | grep -E '^/dev/' || echo "No disk info"
+
+          echo ""
+          echo "=== Memory Usage ==="
+          free -h
+
+          echo ""
+          echo "=== Swap Usage ==="
+          swapon --show 2>/dev/null || echo "No swap configured"
+
+          echo ""
+          echo "=== Docker Status ==="
+          {% raw %}
+          docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || echo "Docker not running"
+          {% endraw %}
+
+          echo ""
+          echo "=== ClamAV Status ==="
+          LATEST_LOG=$(ls -t {{ clamav_log_dir }}/scan_*.log 2>/dev/null | head -1)
+          if [ -n "$LATEST_LOG" ]; then
+            echo "Latest scan log: $LATEST_LOG"
+            tail -5 "$LATEST_LOG"
+          else
+            echo "No scan logs found"
+          fi
+
+          echo ""
+          echo "=== CrowdSec Status ==="
+          if command -v cscli &>/dev/null; then
+            cscli metrics 2>/dev/null | head -20 || echo "CrowdSec metrics unavailable"
+          else
+            echo "CrowdSec not installed"
+          fi
+
+          echo ""
+          echo "=== CrowdSec Decisions ==="
+          if command -v cscli &>/dev/null; then
+            cscli decisions list 2>/dev/null | head -10 || echo "No decisions"
+          fi
+
+          echo ""
+          echo "=== UFW Status ==="
+          ufw status | head -15 2>/dev/null || echo "UFW not enabled"
+
+          echo ""
+          echo "=== Failed SSH Attempts (Last 24h) ==="
+          journalctl -u ssh --since "24 hours ago" 2>/dev/null | grep -c "Failed" || echo "0"
+
+          echo ""
+          echo "=== Fail2ban Status ==="
+          fail2ban-client status sshd 2>/dev/null || echo "Fail2ban not running"
+
+    - name: Add system monitor cron job
+      cron:
+        name: "Daily System Monitor"
+        hour: "6"
+        minute: "0"
+        job: "/usr/local/bin/system_monitor.sh > /tmp/system_report.txt 2>&1"
+        user: root
+
+    # ====================================================
+    # 10. سكربت طوارئ
+    # ====================================================
+    - name: Create emergency UFW fix script
+      copy:
+        dest: /usr/local/bin/emergency_ufw_fix.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # =============================================
+          # سكربت طوارئ لاستعادة الوصول
+          # شغّله من كونسول السيرفر (VNC/Physical)
+          # =============================================
+          echo "=== Emergency UFW Fix ==="
+          echo "Disabling UFW..."
+          ufw disable
+
+          echo "Resetting UFW..."
+          echo "y" | ufw reset
+
+          echo "Re-enabling with safe defaults..."
+          ufw default deny incoming
+          ufw default allow outgoing
+          ufw allow ssh
+          ufw allow {{ reverse_tunnel_port }}/tcp
+          ufw allow 41641/udp
+
+          echo "y" | ufw enable
+          echo "=== UFW restored to safe defaults ==="
+          ufw status verbose
+
+  # ====================================================
+  # Handlers
+  # ====================================================
+  handlers:
+    - name: Restart Docker
+      service:
+        name: docker
+        state: restarted
+      ignore_errors: yes
+
+    - name: Restart CrowdSec
+      service:
+        name: crowdsec
+        state: restarted
+      ignore_errors: yes
+
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
+      ignore_errors: yes
+
+    - name: Apply sysctl settings
+      shell: sysctl -p
+      changed_when: false
+
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+      ignore_errors: yes
+
+  # ====================================================
+  # التحقق النهائي
+  # ====================================================
+  post_tasks:
+    - name: Check Docker
+      shell: docker --version
+      register: docker_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check CrowdSec
+      shell: cscli version
+      register: crowdsec_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check CrowdSec Bouncers
+      shell: cscli bouncers list 2>/dev/null || echo "No bouncers"
+      register: crowdsec_bouncers
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check CrowdSec Collections
+      shell: cscli collections list 2>/dev/null || echo "No collections"
+      register: crowdsec_collections_list
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check ClamAV
+      shell: clamscan --version
+      register: clamav_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check UFW
+      shell: ufw status | head -1
+      register: ufw_final_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check Fail2ban
+      shell: fail2ban-client status 2>/dev/null || echo "Not running"
+      register: fail2ban_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Set service status facts
+      set_fact:
+        docker_status: "{{ 'Ready (' + docker_version.stdout + ')' if docker_version.rc == 0 else 'NOT INSTALLED' }}"
+        crowdsec_status: "{{ 'Ready (' + crowdsec_version.stdout + ')' if crowdsec_version.rc == 0 else 'NOT INSTALLED' }}"
+        clamav_status: "{{ 'Ready (' + clamav_version.stdout + ')' if clamav_version.rc == 0 else 'NOT INSTALLED' }}"
+        ufw_real_status: "{{ ufw_final_status.stdout | default('Unknown') }}"
+
+    - name: Display CrowdSec bouncers
+      debug:
+        msg: "{{ crowdsec_bouncers.stdout_lines | default(['No bouncers found']) }}"
+
+    - name: Display CrowdSec collections
+      debug:
+        msg: "{{ crowdsec_collections_list.stdout_lines | default(['No collections found']) }}"
+
+    - name: Generate setup summary
+      copy:
+        dest: /root/setup_summary.txt
+        content: |
+          ============================================
+          Setup Completion Summary (v3.1 Universal)
+          ============================================
+
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Hostname: {{ ansible_hostname }}
+          System: {{ ansible_distribution }} {{ ansible_distribution_version }}
+
+          === Installed Services ===
+          Docker: {{ docker_status }}
+          CrowdSec: {{ crowdsec_status }}
+          ClamAV: {{ clamav_status }}
+          Firewall: {{ ufw_real_status }}
+          Fail2ban: {{ fail2ban_status.stdout | default('Not checked') }}
+
+          === User Accounts ===
+          User: {{ new_user }}
+          Home: /home/{{ new_user }}
+          Groups: sudo, docker
+
+          === Firewall Configuration ===
+          Default Incoming: DENY
+          Default Outgoing: DENY (with ESTABLISHED/RELATED allowed)
+          Default Routed: ALLOW
+          Allowed Inbound: {{ allowed_inbound_ports | map(attribute='comment') | join(', ') }}, Reverse Tunnel({{ reverse_tunnel_port }})
+          Allowed Outbound: {{ allowed_outbound_ports | map(attribute='comment') | join(', ') }}, Tunnel({{ reverse_tunnel_port }}), ESTABLISHED/RELATED
+          Docker Bridge: Allowed (docker0)
+          Cloudflare Whitelist: {{ 'Enabled' if enable_cloudflare_whitelist else 'Disabled' }}
+
+          === ClamAV Settings ===
+          Quarantine: {{ clamav_quarantine_dir }}
+          Logs: {{ clamav_log_dir }}
+          Daily Scan: {{ clamav_daily_scan_hour }}:00 (Hotspot)
+          Weekly Scan: Day {{ clamav_full_scan_day }} at {{ clamav_full_scan_hour }}:00 (Full)
+          DB Update: Every 4 hours
+
+          === Security ===
+          SSH: {{ 'Key-based only (locked down)' if ssh_key_final_check.stat.exists else 'SAFE MODE - Password still enabled!' }}
+          Fail2ban: Ban time {{ fail2ban_bantime }}s, Max retry {{ fail2ban_maxretry }}
+          Sysctl: Hardened
+          Swap: {{ swap_size }}
+
+          === Emergency ===
+          UFW Fix Script: /usr/local/bin/emergency_ufw_fix.sh
+          Monitor Script: /usr/local/bin/system_monitor.sh
+
+          ============================================
+
+    - name: Display completion message
+      debug:
+        msg: |
+          ============================================================
+            ✅ Setup Completed! (v3.1 Universal Edition)
+          ============================================================
+           Server: {{ ansible_hostname }}
+           System: {{ ansible_distribution }} {{ ansible_distribution_version }}
+           User: {{ new_user }}
+           Timezone: {{ timezone }}
+
+           Docker: {{ docker_status }}
+           CrowdSec: {{ crowdsec_status }}
+           ClamAV: {{ clamav_status }}
+           Firewall: {{ ufw_real_status }}
+           Fail2ban: {{ fail2ban_status.stdout | default('Unknown') }}
+
+           SSH Key: {{ 'FOUND - Fully locked down' if ssh_key_final_check.stat.exists else 'NOT FOUND - Safe mode' }}
+           Reverse Tunnel: Port {{ reverse_tunnel_port }} (ALLOWED)
+
+           Summary: /root/setup_summary.txt
+           Emergency: /usr/local/bin/emergency_ufw_fix.sh
+           Monitor: /usr/local/bin/system_monitor.sh
+          ============================================================

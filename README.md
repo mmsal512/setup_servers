@@ -1,35 +1,427 @@
-Markdown
-# 🛡️ Ultimate Secure Server Setup (Ansible Playbook)
 
-This Ansible playbook automates the process of securing a Linux server (Kali, Debian, Ubuntu). It installs Docker, configures a Firewall (UFW) with safe defaults, sets up CrowdSec IPS, and installs a smart ClamAV antivirus scanner with webhook alerts.
 
-## ✨ Features
+# 🛡️ Ultimate Secure Setup v3.1 — Universal Edition
 
-* **System Updates:** Auto-updates repositories (Fixes Kali repos automatically).
-* **User Security:** Creates a sudo user and sets up SSH keys.
-* **Hardening:** Configures `sysctl` security parameters and SSH locking.
-* **Firewall:** UFW configured with a "Default Deny" policy, preserving SSH & VPN connections.
-* **Intrusion Prevention:** Installs **CrowdSec** + Firewall Bouncer.
-* **Antivirus:** Installs **ClamAV** with a custom script for optimized daily scans.
-* **Monitoring:** Optional Webhook integration for virus alerts (Discord/Slack/Telegram).
+### Ansible Playbook for Full Server Hardening
 
-## 🚀 Usage
+> **Docker + CrowdSec + Smart ClamAV + UFW + Fail2ban + SSH Hardening**
+> متوافق مع: **Kali Linux** / **Debian 11+** / **Ubuntu 20.04+**
 
-### 1. Prerequisites
-* A fresh Linux server (Kali Linux, Ubuntu, or Debian).
-* Ansible installed on your local machine:
-  ```bash
-  sudo apt install ansible
-SSH access to the server as root.2. ConfigurationOpen the secure_kali_setup.yml file and edit the vars section at the top:YAMLvars:
-  target_user: "your_username"       # <--- Change this
-  timezone: "Asia/Riyadh"            # <--- Change this
-  
-  # Optional: Add your SSH Public Key here to avoid password login issues
-  ssh_public_key: "ssh-ed25519 AAAA..." 
-  
-  # Optional: Add a webhook URL for notifications (Discord, etc.)
-  webhook_url: ""
-3. Create InventoryCreate a file named hosts.ini and add your server IP:Ini, TOML[servers]
-192.168.1.100 ansible_user=root
-4. Run the PlaybookRun the following command to start the setup:Bashansible-playbook -i hosts.ini secure_kali_setup.yml
-🛠️ What specific tools are configured?ToolPurposeConfigurationUFWFirewallDeny Incoming / Allow Specific Outbound.CrowdSecIPSMonitors Syslogs, SSH, and Docker containers.ClamAVAntivirusDaily "Smart Scan" + Weekly Full Scan.Fail2BanBruteforce ProtectionProtects SSH.DockerContainer EngineInstalled with secure logging defaults.⚠️ DisclaimerThis script modifies firewall rules and SSH configurations. Always ensure you have a backup access method (like a console/VNC) before running it on a remote server.LicenseMIT
+---
+
+## 📋 جدول المحتويات
+
+- [نظرة عامة](#-نظرة-عامة)
+- [المميزات](#-المميزات)
+- [المتطلبات](#-المتطلبات)
+- [البنية والمكونات](#-البنية-والمكونات)
+- [التثبيت والاستخدام](#-التثبيت-والاستخدام)
+- [المتغيرات القابلة للتعديل](#-المتغيرات-القابلة-للتعديل)
+- [تفاصيل المكونات](#-تفاصيل-المكونات)
+- [سكربتات مساعدة](#-سكربتات-مساعدة)
+- [استكشاف الأخطاء](#-استكشاف-الأخطاء)
+- [الأمان](#-ملاحظات-أمنية)
+- [المساهمة](#-المساهمة)
+- [الرخصة](#-الرخصة)
+
+---
+
+## 🔭 نظرة عامة
+
+هذا الـ Playbook يقوم بتحويل سيرفر Linux خام إلى بيئة مُحصّنة بالكامل وجاهزة للإنتاج في تشغيل واحد. يتعامل مع ترتيب العمليات بذكاء — فيُثبّت Docker ويُحدّث قواعد بيانات ClamAV **قبل** تفعيل جدار الحماية UFW، ويضمن حماية الاتصالات النشطة عبر قواعد `ESTABLISHED/RELATED` لمنع انقطاع جلسة SSH أثناء التنفيذ.
+
+```
+┌─────────────────────────────────────────────────┐
+│              Ultimate Secure Setup               │
+│                    v3.1                          │
+├─────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+│  │  Docker   │  │ CrowdSec │  │   ClamAV     │  │
+│  │  Engine   │  │  + LAPI  │  │  Smart Scan  │  │
+│  └──────────┘  └──────────┘  └──────────────┘  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+│  │   UFW    │  │ Fail2ban │  │  SSH Hardened │  │
+│  │ Hardened  │  │  Active  │  │  Key-Only    │  │
+│  └──────────┘  └──────────┘  └──────────────┘  │
+│  ┌──────────────────────────────────────────┐   │
+│  │     Sysctl Kernel Hardening + Swap       │   │
+│  └──────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## ✨ المميزات
+
+| المكون | الوصف |
+|--------|-------|
+| **حماية الاتصال** | قواعد `ESTABLISHED/RELATED` تُضاف قبل تفعيل UFW لمنع فقدان جلسة SSH |
+| **Docker** | تثبيت Docker + Compose مع تكوين آمن (`icc: false`, `live-restore`, حد للسجلات) |
+| **CrowdSec** | نظام حماية تشاركي مع Firewall Bouncer — ثلاث طرق تثبيت احتياطية |
+| **ClamAV الذكي** | فحص يومي سريع (Hotspot) + فحص أسبوعي شامل + تحديث تلقائي لقاعدة البيانات |
+| **UFW المُحكم** | سياسة `deny` للوارد **والصادر** مع قائمة بيضاء دقيقة |
+| **Fail2ban** | حماية SSH من هجمات القوة الغاشمة |
+| **SSH Hardening** | وضعان: قفل كامل (عند وجود مفتاح) أو وضع آمن (بدون مفتاح) |
+| **Cloudflare Whitelist** | إضافة تلقائية لعناوين Cloudflare IPv4/IPv6 |
+| **سكربت طوارئ** | استعادة الوصول بأمر واحد عند الإغلاق |
+| **نظام مراقبة** | تقرير يومي شامل عن صحة السيرفر |
+| **إشعارات Webhook** | تنبيهات فورية عند اكتشاف تهديدات |
+
+---
+
+## 📦 المتطلبات
+
+### على جهازك (Control Node)
+
+- **Ansible** 2.12 أو أحدث
+- اتصال SSH بالسيرفر الهدف بصلاحيات root
+
+```bash
+# تثبيت Ansible
+pip install ansible
+
+# أو على Ubuntu/Debian
+sudo apt install ansible
+```
+
+### على السيرفر الهدف (Managed Node)
+
+- **نظام التشغيل:** Kali Linux / Debian 11+ / Ubuntu 20.04+
+- **المعمارية:** `amd64` (x86_64)
+- **ذاكرة RAM:** 1 GB كحد أدنى (2 GB مُوصى)
+- **مساحة القرص:** 10 GB فارغة كحد أدنى
+- **اتصال إنترنت** أثناء التشغيل الأول
+- صلاحيات **root**
+
+---
+
+## 🏗 البنية والمكونات
+
+ترتيب التنفيذ مصمم بعناية لتجنب أي انقطاع:
+
+```
+ 1. ✅ إصلاح المستودعات + التحديثات
+ 2. 👤 إعداد المستخدم + SSH Keys
+ 3. 🐳 تثبيت Docker + Compose          ← قبل UFW
+ 4. 🦠 تثبيت ClamAV + تحديث قاعدة البيانات  ← قبل UFW
+ 5. 🤖 تثبيت CrowdSec + Bouncer
+ 6. 💾 إعداد Swap
+ 7. 🔐 تقوية SSH + Sysctl + Fail2ban
+ 8. 🧱 تفعيل UFW                       ← آخر خطوة
+ 9. 📊 سكربتات المراقبة
+10. 🆘 سكربت الطوارئ
+```
+
+---
+
+## 🚀 التثبيت والاستخدام
+
+### 1. استنساخ المشروع
+
+```bash
+git clone https://github.com/YOUR_USERNAME/ultimate-secure-setup.git
+cd ultimate-secure-setup
+```
+
+### 2. إعداد ملف Inventory
+
+أنشئ ملف `hosts.ini`:
+
+```ini
+[target_servers]
+my-server ansible_host=203.0.113.50 ansible_user=root ansible_port=22
+
+# لعدة سيرفرات:
+# server-2 ansible_host=203.0.113.51 ansible_user=root
+# server-3 ansible_host=203.0.113.52 ansible_user=root
+```
+
+### 3. تعديل المتغيرات
+
+افتح ملف `setup.yml` وعدّل القسم العلوي فقط:
+
+```yaml
+vars:
+  new_user: "deploy"
+  ssh_public_key: "ssh-ed25519 AAAAC3Nz... user@host"
+  timezone: "Asia/Riyadh"
+  swap_size: "4G"
+  reverse_tunnel_port: "9999"
+  webhook_url: "https://example.com/webhook/alerts"
+```
+
+### 4. تشغيل الـ Playbook
+
+```bash
+# تشغيل عادي
+ansible-playbook -i hosts.ini setup.yml
+
+# تشغيل مع عرض التفاصيل
+ansible-playbook -i hosts.ini setup.yml -v
+
+# تشغيل تجريبي (بدون تطبيق)
+ansible-playbook -i hosts.ini setup.yml --check
+
+# تشغيل على سيرفر واحد فقط
+ansible-playbook -i hosts.ini setup.yml --limit my-server
+```
+
+---
+
+## ⚙️ المتغيرات القابلة للتعديل
+
+### معلومات المستخدم
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `new_user` | `deploy` | اسم المستخدم الجديد |
+| `ssh_public_key` | `""` | المفتاح العام SSH (اختياري) |
+
+### إعدادات النظام
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `timezone` | `UTC` | المنطقة الزمنية |
+| `swap_size` | `4G` | حجم ملف Swap |
+
+### إعدادات الشبكة
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `reverse_tunnel_port` | `9999` | منفذ النفق العكسي |
+| `webhook_url` | `""` | رابط Webhook للتنبيهات |
+| `enable_cloudflare_whitelist` | `true` | تفعيل القائمة البيضاء لـ Cloudflare |
+
+### المنافذ المسموح بها — الوارد
+
+```yaml
+allowed_inbound_ports:
+  - { port: "22", proto: "tcp", comment: "SSH access" }
+  - { port: "41641", proto: "udp", comment: "Tailscale VPN" }
+  # أضف منافذ إضافية:
+  # - { port: "8080", proto: "tcp", comment: "Web App" }
+  # - { port: "8069", proto: "tcp", comment: "Odoo" }
+```
+
+### المنافذ المسموح بها — الصادر
+
+```yaml
+allowed_outbound_ports:
+  - { port: "53", proto: "udp", comment: "DNS queries" }
+  - { port: "53", proto: "tcp", comment: "DNS queries TCP" }
+  - { port: "80", proto: "tcp", comment: "HTTP updates" }
+  - { port: "443", proto: "tcp", comment: "HTTPS secure" }
+  - { port: "123", proto: "udp", comment: "NTP time sync" }
+```
+
+### ClamAV
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `clamav_db_mirror` | `database.clamav.net` | مرآة قاعدة البيانات |
+| `clamav_quarantine_dir` | `/root/quarantine` | مجلد الحجر |
+| `clamav_full_scan_day` | `5` | يوم الفحص الشامل (5=الجمعة) |
+| `clamav_daily_scan_hour` | `2` | ساعة الفحص اليومي |
+| `clamav_full_scan_hour` | `3` | ساعة الفحص الأسبوعي |
+
+### Docker
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `docker_log_max_size` | `10m` | الحد الأقصى لحجم سجل الحاوية |
+| `docker_log_max_file` | `3` | عدد ملفات السجل المُحتفظ بها |
+
+### Fail2ban
+
+| المتغير | الافتراضي | الوصف |
+|---------|-----------|-------|
+| `fail2ban_bantime` | `86400` | مدة الحظر بالثواني (24 ساعة) |
+| `fail2ban_findtime` | `600` | نافذة البحث (10 دقائق) |
+| `fail2ban_maxretry` | `3` | عدد المحاولات قبل الحظر |
+
+### CrowdSec
+
+```yaml
+crowdsec_monitored_containers:
+  - { name: "traefik_gateway", type: "traefik" }
+  - { name: "app", type: "syslog" }
+  - { name: "db", type: "pgsql" }
+
+crowdsec_collections:
+  - crowdsecurity/linux
+  - crowdsecurity/traefik
+  - crowdsecurity/postgresql
+  - crowdsecurity/http-cve
+  - crowdsecurity/base-http-scenarios
+```
+
+---
+
+## 🔍 تفاصيل المكونات
+
+### جدار الحماية UFW
+
+السياسة الافتراضية صارمة: **حظر الوارد والصادر** مع السماح فقط بالمنافذ المحددة. يتم تعديل `/etc/ufw/before.rules` لإضافة قاعدة `ESTABLISHED/RELATED` للاتصالات الصادرة، مما يضمن عدم انقطاع الجلسات النشطة (SSH, tunnels) عند تفعيل الجدار.
+
+```
+Incoming:  DENY (default) → Allow: SSH, Tailscale, Reverse Tunnel
+Outgoing:  DENY (default) → Allow: DNS, HTTP, HTTPS, NTP, Tunnel
+                           → Allow: ESTABLISHED/RELATED (before.rules)
+Routed:    ALLOW (for Docker)
+Docker:    docker0 bridge allowed
+```
+
+### ClamAV — الفحص الذكي
+
+يعمل ClamAV بدون daemon لتوفير الموارد. نظام الفحص ذكي:
+
+- **يومياً** — فحص سريع للمجلدات الحساسة: `/home`, `/tmp`, `/var/lib/docker/volumes`, `/etc`, `/var/www`, `/opt`
+- **أسبوعياً** — فحص شامل لكامل النظام `/` (مع timeout 14 ساعة)
+- **كل 4 ساعات** — تحديث قاعدة بيانات التوقيعات
+
+الفحص يعمل بأولوية منخفضة (`nice -n 19`, `ionice -c 3`) لتقليل التأثير على الأداء.
+
+### CrowdSec
+
+نظام حماية تشاركي يراقب سجلات النظام وحاويات Docker. يتم تثبيت Firewall Bouncer بثلاث طرق احتياطية:
+
+1. الحزمة الموحدة `crowdsec-firewall-bouncer`
+2. الحزمة المتخصصة (iptables أو nftables)
+3. التثبيت من GitHub كملاذ أخير
+
+### وضع SSH الآمن
+
+الـ Playbook يكتشف تلقائياً وجود مفتاح SSH:
+
+- **مفتاح موجود** → قفل كامل: `PasswordAuthentication no` + `PermitRootLogin no`
+- **بدون مفتاح** → وضع آمن: `PasswordAuthentication yes` + `PermitRootLogin prohibit-password` مع تحذير واضح
+
+---
+
+## 🛠 سكربتات مساعدة
+
+### سكربت الطوارئ
+
+```bash
+# عند فقدان الوصول — شغّل من كونسول السيرفر (VNC / Physical / KVM)
+/usr/local/bin/emergency_ufw_fix.sh
+```
+
+يقوم بإعادة UFW إلى إعدادات آمنة مع السماح بـ SSH والنفق العكسي.
+
+### سكربت المراقبة
+
+```bash
+# تشغيل يدوي
+/usr/local/bin/system_monitor.sh
+
+# التقرير اليومي التلقائي (6:00 صباحاً)
+cat /tmp/system_report.txt
+```
+
+يعرض: استخدام القرص، الذاكرة، حالة Docker، آخر فحص ClamAV، إحصائيات CrowdSec، حالة UFW و Fail2ban.
+
+### ملخص التثبيت
+
+```bash
+cat /root/setup_summary.txt
+```
+
+---
+
+## 🔧 استكشاف الأخطاء
+
+### فقدت الاتصال بالسيرفر بعد التشغيل
+
+اتصل عبر **كونسول VNC** من لوحة تحكم مزود الاستضافة، ثم:
+
+```bash
+/usr/local/bin/emergency_ufw_fix.sh
+```
+
+### CrowdSec لم يُثبّت
+
+```bash
+# تحقق من الحالة
+cscli version
+cscli bouncers list
+
+# إعادة التثبيت يدوياً
+curl -s https://install.crowdsec.net | bash
+apt update && apt install crowdsec
+```
+
+### Docker لا يعمل
+
+```bash
+systemctl status docker
+journalctl -u docker --no-pager -n 50
+
+# إعادة التشغيل
+systemctl restart docker
+```
+
+### ClamAV — التحديث فشل
+
+```bash
+# تحديث يدوي
+freshclam --verbose
+
+# تحقق من السجل
+cat /var/log/clamav/freshclam.log
+```
+
+### UFW يحظر اتصالات مطلوبة
+
+```bash
+# عرض القواعد
+ufw status numbered
+
+# إضافة منفذ
+ufw allow 8080/tcp comment "My App"
+
+# عرض السجلات
+tail -f /var/log/ufw.log
+```
+
+---
+
+## 🔒 ملاحظات أمنية
+
+> **تحذير:** لا تُشغّل هذا الـ Playbook على سيرفر إنتاج بدون اختباره أولاً على بيئة تجريبية.
+
+- تأكد من وجود **مفتاح SSH** قبل التشغيل لتفعيل القفل الكامل
+- احتفظ بطريقة وصول بديلة (VNC / KVM / Console) دائماً
+- سياسة الصادر `deny` قد تمنع بعض التطبيقات — أضف المنافذ اللازمة في `allowed_outbound_ports`
+- غيّر `reverse_tunnel_port` من القيمة الافتراضية `9999`
+- لا تترك `webhook_url` فارغاً في بيئة الإنتاج — فعّل التنبيهات
+- راجع `/root/setup_summary.txt` بعد كل تشغيل
+
+---
+
+## 🤝 المساهمة
+
+المساهمات مُرحّب بها! إذا وجدت مشكلة أو لديك اقتراح:
+
+1. افتح **Issue** لوصف المشكلة أو الاقتراح
+2. أنشئ **Fork** من المشروع
+3. أنشئ فرع جديد: `git checkout -b feature/my-feature`
+4. قدّم التعديلات: `git commit -m "Add my feature"`
+5. ادفع الفرع: `git push origin feature/my-feature`
+6. افتح **Pull Request**
+
+---
+
+## 📄 الرخصة
+
+هذا المشروع مرخّص تحت رخصة [MIT](LICENSE).
+
+---
+
+<div align="center">
+
+**صُمم بعناية لحماية سيرفراتك**
+
+إذا أعجبك المشروع، لا تنسَ ⭐
+
+</div>
