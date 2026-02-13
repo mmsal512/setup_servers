@@ -119,8 +119,8 @@ sudo apt install ansible
 ### 1. استنساخ المشروع
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ultimate-secure-setup.git
-cd ultimate-secure-setup
+git clone git@github.com:mmsal512/setup_servers.git
+cd setup_servers
 ```
 
 ### 2. إعداد ملف Inventory
