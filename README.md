@@ -138,7 +138,7 @@ my-server ansible_host=203.0.113.50 ansible_user=root ansible_port=22
 
 ### 3. تعديل المتغيرات
 
-افتح ملف `setup.yml` وعدّل القسم العلوي فقط:
+افتح ملف `ultimate-secure-setup.yml` وعدّل القسم العلوي فقط:
 
 ```yaml
 vars:
@@ -154,16 +154,16 @@ vars:
 
 ```bash
 # تشغيل عادي
-ansible-playbook -i hosts.ini setup.yml
+ansible-playbook -i hosts.ini ultimate-secure-setup.yml
 
 # تشغيل مع عرض التفاصيل
-ansible-playbook -i hosts.ini setup.yml -v
+ansible-playbook -i hosts.ini ultimate-secure-setup.yml -v
 
 # تشغيل تجريبي (بدون تطبيق)
-ansible-playbook -i hosts.ini setup.yml --check
+ansible-playbook -i hosts.ini ultimate-secure-setup.yml --check
 
 # تشغيل على سيرفر واحد فقط
-ansible-playbook -i hosts.ini setup.yml --limit my-server
+ansible-playbook -i hosts.ini ultimate-secure-setup.yml --limit my-server
 ```
 
 ---
