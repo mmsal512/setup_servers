@@ -129,8 +129,8 @@ sudo apt install ansible
 ### 1. استنساخ المشروع
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/setup_servers.git
-cd setup_servers
+git clone https://github.com/YOUR_USERNAME/ultimate-secure-setup.git
+cd ultimate-secure-setup
 ```
 
 ### 2. إعداد ملف Inventory
@@ -173,39 +173,7 @@ ansible-playbook -i hosts.ini ultimate-secure-setup.yml -v
 ansible-playbook -i hosts.ini ultimate-secure-setup.yml --check
 
 # تشغيل على سيرفر واحد فقط
-ansible-playbook -i hosts.ini ultimate-secure-setup.yml --limit my-server
-```
-
-### 5. التحقق من النتائج
-
-```bash
-# فحص شامل للسيرفر (30 قسم)
-sudo bash check-server.sh
-
-# فحص نظام التنبيهات
-sudo bash check_webhook.sh
-
-# إصلاح المشاكل المكتشفة تلقائياً
-sudo bash fix_ultimate_setup.sh
-```
-
----
-
-## 🏗 ترتيب التنفيذ
-
-ترتيب التنفيذ في الـ Playbook مصمم بعناية لتجنب أي انقطاع:
-
-```
- 1. ✅ إصلاح المستودعات + التحديثات
- 2. 👤 إعداد المستخدم + SSH Keys
- 3. 🐳 تثبيت Docker + Compose          ← قبل UFW
- 4. 🦠 تثبيت ClamAV + تحديث قاعدة البيانات  ← قبل UFW
- 5. 🤖 تثبيت CrowdSec + Bouncer
- 6. 💾 إعداد Swap
- 7. 🔐 تقوية SSH + Sysctl + Fail2ban
- 8. 🧱 تفعيل UFW                       ← آخر خطوة
- 9. 📊 سكربتات المراقبة
-10. 🆘 سكربت الطوارئ
+ansible-playbook -i hosts.ini setup.yml --limit my-server
 ```
 
 ---
